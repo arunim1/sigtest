@@ -1,0 +1,57 @@
+services:
+  computer-use-demo:
+    build:
+      context: .
+      dockerfile: computer-use.Dockerfile
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DISPLAY=:1
+      - XAUTHORITY=/home/computeruse/.Xauthority
+    volumes:
+      - $HOME/.anthropic:/home/computeruse/.anthropic
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    ports:
+      - "5901:5901"
+      - "8501:8501"
+      - "6080:6080"
+      - "8080:8080"
+    networks:
+      - app_net
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      # - cert-gen
+      - nginx-proxy
+
+  # cert-gen:
+  #   build:
+  #     context: .
+  #     dockerfile: certgen.Dockerfile
+  #   volumes:
+  #     - ./ca:/ca
+  #     - ./certs:/certs
+
+  # Nginx reverse proxy for header injection and routing
+  nginx-proxy:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/certs:ro
+    networks:
+      - app_net
+    depends_on:
+      - logging-server
+
+  # Simple logging web server
+  logging-server:
+    build: 
+      context: .
+      dockerfile: logger.Dockerfile
+    networks:
+      - app_net
+    ports:
+      - "127.0.0.1:8000:8000"
+
+networks:
+  app_net:
+    driver: bridge
