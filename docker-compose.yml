@@ -20,16 +20,7 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      # - cert-gen
       - nginx-proxy
-
-  # cert-gen:
-  #   build:
-  #     context: .
-  #     dockerfile: certgen.Dockerfile
-  #   volumes:
-  #     - ./ca:/ca
-  #     - ./certs:/certs
 
   # Nginx reverse proxy for header injection and routing
   nginx-proxy:

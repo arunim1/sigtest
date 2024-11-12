@@ -1,24 +1,26 @@
 # Comprehensive Explanation of the Codebase
 
-This codebase sets up a Docker-based environment that includes a computer-use demo application, a logging server, a reverse proxy using Nginx, and certificate generation for secure communications. Below is a detailed walkthrough of each component and its respective code.
+This codebase sets up a Docker-based environment that includes a computer-use demo application, a logging server, a reverse proxy using Nginx, and signature support via a signer service. Below is a detailed walkthrough of each component and its respective code.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Dockerfiles](#dockerfiles)
-   - [computer-use.Dockerfile](#computer-usedockerfile)
-   - [logger.Dockerfile](#loggerdockerfile)
-   - [certgen.Dockerfile](#certgendockerfile)
-3. [Python Scripts](#python-scripts)
-   - [logger.py](#loggerpy)
-   - [generate_certs.py](#generate_certspy)
-4. [Nginx Configuration](#nginx-configuration)
-   - [nginx.conf](#nginxconf)
-5. [Shell Script](#shell-script)
-   - [entrypoint.sh](#entrypointsh)
-6. [Docker Compose](#docker-compose)
-   - [docker-compose.yml](#docker-composeyml)
-7. [Summary](#summary)
+- [Comprehensive Explanation of the Codebase](#comprehensive-explanation-of-the-codebase)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Dockerfiles](#dockerfiles)
+    - [`computer-use.Dockerfile`](#computer-usedockerfile)
+    - [`logger.Dockerfile`](#loggerdockerfile)
+    - [`signer.Dockerfile`](#signerdockerfile)
+  - [Python Scripts](#python-scripts)
+    - [`logger.py`](#loggerpy)
+    - [`signer.py`](#signerpy)
+  - [Nginx Configuration](#nginx-configuration)
+    - [`nginx.conf`](#nginxconf)
+  - [Shell Script](#shell-script)
+    - [`entrypoint.sh`](#entrypointsh)
+  - [Docker Compose](#docker-compose)
+    - [`docker-compose.yml`](#docker-composeyml)
+  - [Summary](#summary)
 
 ---
 
@@ -29,9 +31,9 @@ The system is composed of several Docker containers orchestrated using Docker Co
 - **computer-use-demo**: The main application container.
 - **nginx-proxy**: Acts as a reverse proxy to handle HTTP requests and inject custom headers.
 - **logging-server**: A simple HTTP server that logs incoming requests.
-- **cert-gen**: (Commented out) Generates SSL certificates for secure communication.
+- **signer**: A Flask-based service that signs requests using a private key.
 
-Additionally, custom scripts and configurations manage networking, certificate generation, and request logging.
+Additionally, custom scripts and configurations manage networking, request logging, and request signing.
 
 ---
 
@@ -51,22 +53,19 @@ RUN apt-get update && \
     apt-get install -y iptables && \
     rm -rf /var/lib/apt/lists/* 
 
-# Copy the CA certificate
-COPY ./ca/rootCA.crt /usr/local/share/ca-certificates/
-RUN update-ca-certificates
-
 # Ensure proper X11 permissions
 RUN mkdir -p /tmp/.X11-unix && \
     chmod 1777 /tmp/.X11-unix
 
-# Copy the original entrypoint script
-RUN cp /entrypoint.sh /original-entrypoint.sh
-
-# Copy the new entrypoint script
+# Copy and set permissions for entrypoint scripts
+COPY original-entrypoint.sh /original-entrypoint.sh
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && \
+
+RUN chmod +x /original-entrypoint.sh && \
+    chmod +x /entrypoint.sh && \
+    chown computeruse:computeruse /original-entrypoint.sh && \
     chown computeruse:computeruse /entrypoint.sh
-    
+
 USER computeruse
 
 ENTRYPOINT ["/entrypoint.sh"]
@@ -74,19 +73,19 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 **Line-by-Line Explanation:**
 
-1. **Base Image**:  
+1. **Base Image**:
    ```dockerfile
    FROM ghcr.io/anthropics/anthropic-quickstarts:computer-use-demo-latest
    ```  
    - Uses a base image from Anthropic's GitHub Container Registry tailored for the computer-use demo.
 
-2. **Switch to Root User**:  
+2. **Switch to Root User**:
    ```dockerfile
    USER root
    ```  
    - Grants administrative privileges to perform system-level tasks.
 
-3. **Install `iptables`**:  
+3. **Install `iptables`**:
    ```dockerfile
    RUN apt-get update && \
        apt-get install -y iptables && \
@@ -94,36 +93,33 @@ ENTRYPOINT ["/entrypoint.sh"]
    ```  
    - Updates package lists, installs `iptables` for network traffic management, and cleans up to reduce image size.
 
-4. **Copy CA Certificate**:  
-   ```dockerfile
-   COPY ./ca/rootCA.crt /usr/local/share/ca-certificates/
-   RUN update-ca-certificates
-   ```  
-   - Adds a custom Certificate Authority (CA) certificate to the system and updates the certificate store.
-
-5. **Set Up X11 Permissions**:  
+4. **Set Up X11 Permissions**:
    ```dockerfile
    RUN mkdir -p /tmp/.X11-unix && \
        chmod 1777 /tmp/.X11-unix
    ```  
    - Creates the X11 Unix socket directory with appropriate permissions for GUI applications.
 
-6. **Manage Entrypoint Scripts**:  
+5. **Manage Entrypoint Scripts**:
    ```dockerfile
-   RUN cp /entrypoint.sh /original-entrypoint.sh
+   COPY original-entrypoint.sh /original-entrypoint.sh
    COPY entrypoint.sh /entrypoint.sh
-   RUN chmod +x /entrypoint.sh && \
+
+   RUN chmod +x /original-entrypoint.sh && \
+       chmod +x /entrypoint.sh && \
+       chown computeruse:computeruse /original-entrypoint.sh && \
        chown computeruse:computeruse /entrypoint.sh
    ```  
-   - Backs up the original entrypoint script, replaces it with a custom `entrypoint.sh`, makes it executable, and changes ownership to the `computeruse` user.
+   - Copies both the original and custom entrypoint scripts into the container.
+   - Makes them executable and changes ownership to the `computeruse` user.
 
-7. **Switch Back to Non-Root User**:  
+6. **Switch Back to Non-Root User**:
    ```dockerfile
    USER computeruse
    ```  
    - Enhances security by running the container with a non-root user.
 
-8. **Set Entrypoint**:  
+7. **Set Entrypoint**:
    ```dockerfile
    ENTRYPOINT ["/entrypoint.sh"]
    ```  
@@ -144,94 +140,89 @@ COPY logger.py .
 
 EXPOSE 8000
 
-CMD ["python", "logger.py"]
+CMD ["python", "-u", "logger.py"]
 ```
 
 **Line-by-Line Explanation:**
 
-1. **Base Image**:  
+1. **Base Image**:
    ```dockerfile
    FROM python:3.9-slim
    ```  
    - Uses a lightweight Python 3.9 image.
 
-2. **Set Working Directory**:  
+2. **Set Working Directory**:
    ```dockerfile
    WORKDIR /app
    ```  
    - Sets `/app` as the current working directory inside the container.
 
-3. **Copy Application Code**:  
+3. **Copy Application Code**:
    ```dockerfile
    COPY logger.py .
    ```  
    - Copies the `logger.py` script into the container's working directory.
 
-4. **Expose Port**:  
+4. **Expose Port**:
    ```dockerfile
    EXPOSE 8000
    ```  
    - Opens port `8000` for incoming connections.
 
-5. **Define Command**:  
+5. **Define Command**:
    ```dockerfile
-   CMD ["python", "logger.py"]
+   CMD ["python", "-u", "logger.py"]
    ```  
-   - Specifies the command to run the `logger.py` script using Python.
+   - Specifies the command to run the `logger.py` script using Python in unbuffered mode.
 
 ---
 
-### `certgen.Dockerfile`
+### `signer.Dockerfile`
 
-This Dockerfile builds the `cert-gen` container, responsible for generating SSL certificates.
+This Dockerfile builds the `signer` container, which provides signature support for incoming requests.
 
 ```dockerfile
 FROM python:3.9-slim
 
-RUN apt-get update && \
-    apt-get install -y openssl && \
-    rm -rf /var/lib/apt/lists/*
+RUN pip install flask cryptography
 
 WORKDIR /app
+COPY signer.py .
 
-COPY generate_certs.py .
-
-CMD ["python", "generate_certs.py"]
+CMD ["python", "signer.py"]
 ```
 
 **Line-by-Line Explanation:**
 
-1. **Base Image**:  
+1. **Base Image**:
    ```dockerfile
    FROM python:3.9-slim
    ```  
    - Uses a lightweight Python 3.9 image.
 
-2. **Install OpenSSL**:  
+2. **Install Dependencies**:
    ```dockerfile
-   RUN apt-get update && \
-       apt-get install -y openssl && \
-       rm -rf /var/lib/apt/lists/*
+   RUN pip install flask cryptography
    ```  
-   - Updates package lists, installs OpenSSL for certificate generation, and cleans up to reduce image size.
+   - Installs the `flask` framework for building the web service and `cryptography` library for handling cryptographic operations.
 
-3. **Set Working Directory**:  
+3. **Set Working Directory**:
    ```dockerfile
    WORKDIR /app
    ```  
    - Sets `/app` as the current working directory inside the container.
 
-4. **Copy Certificate Generation Script**:  
+4. **Copy Application Code**:
    ```dockerfile
-   COPY generate_certs.py .
+   COPY signer.py .
    ```  
-   - Copies the `generate_certs.py` script into the container's working directory.
+   - Copies the `signer.py` script into the container's working directory.
 
-5. **Define Command**:  
+5. **Define Command**:
    ```dockerfile
-   CMD ["python", "generate_certs.py"]
+   CMD ["python", "signer.py"]
    ```  
-   - Specifies the command to run the `generate_certs.py` script using Python.
+   - Specifies the command to run the `signer.py` script using Python.
 
 ---
 
@@ -291,11 +282,16 @@ if __name__ == "__main__":
 
 **Line-by-Line Explanation:**
 
-1. **Imports**:  
-   - `json`, `datetime` for handling time and formatting logs.  
+1. **Imports**:
+   ```python
+   import json
+   from datetime import datetime
+   from http.server import BaseHTTPRequestHandler, HTTPServer
+   ```  
+   - `json`, `datetime` for handling time and formatting logs.
    - `BaseHTTPRequestHandler`, `HTTPServer` for creating the HTTP server.
 
-2. **LoggingHandler Class**:  
+2. **LoggingHandler Class**:
    ```python
    class LoggingHandler(BaseHTTPRequestHandler):
        def _handle_request(self):
@@ -320,7 +316,7 @@ if __name__ == "__main__":
    - The `_handle_request` method logs request details and sends a response.
    - The HTTP methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) all delegate to `_handle_request`.
 
-3. **Handling Requests**:  
+3. **Handling Requests**:
    ```python
    def _handle_request(self):
        # Log request details
@@ -346,7 +342,7 @@ if __name__ == "__main__":
    - Prints the request information as a formatted JSON string to the console.
    - Sends a `200 OK` response with a plain text message.
 
-4. **Running the Server**:  
+4. **Running the Server**:
    ```python
    if __name__ == "__main__":
        server = HTTPServer(("0.0.0.0", 8000), LoggingHandler)
@@ -359,185 +355,115 @@ if __name__ == "__main__":
 
 ---
 
-### `generate_certs.py`
+### `signer.py`
 
-This script generates a root Certificate Authority (CA) and a wildcard certificate signed by this CA using OpenSSL.
+A Flask-based service that signs incoming requests using a private key.
 
 ```python
-import subprocess
-from pathlib import Path
+from flask import Flask, request
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+import time
 
-CA_DIR = Path("/ca")
-CERTS_DIR = Path("/certs")
+app = Flask(__name__)
 
+# Load the private key at startup
+with open("/certs/private_key.pem", "rb") as key_file:
+    private_key = serialization.load_pem_private_key(
+        key_file.read(),
+        password=None,
+    )
 
-def run_openssl(command):
-    subprocess.run(["openssl"] + command, check=True)
+@app.route('/sign', methods=['GET'])
+def sign():
+    request_id = request.args.get('id', '')
+    timestamp = str(int(time.time()))
+    
+    # Create and sign message
+    message = f"{timestamp} | {request_id}"
+    print(f"Signing message: {message}", flush=True)
+    signature = private_key.sign(
+        message.encode(),
+        padding.PKCS1v15(),
+        hashes.SHA256()
+    )
+    print(f"Signature: {signature.hex()}", flush=True)
+    
+    # Return headers instead of JSON
+    response = app.make_response('')
+    response.headers['X-Timestamp'] = timestamp
+    response.headers['X-Signature'] = signature.hex()
+    return response
 
-
-def generate_ca():
-    """Generate root CA certificate and private key"""
-    if not (CA_DIR / "rootCA.key").exists():
-        # Generate CA private key
-        run_openssl(["genrsa", "-out", str(CA_DIR / "rootCA.key"), "4096"])
-
-        # Generate CA certificate
-        run_openssl(
-            [
-                "req",
-                "-x509",
-                "-new",
-                "-nodes",
-                "-key",
-                str(CA_DIR / "rootCA.key"),
-                "-sha256",
-                "-days",
-                "3650",
-                "-out",
-                str(CA_DIR / "rootCA.crt"),
-                "-subj",
-                "/C=US/ST=State/L=City/O=Proxy CA/CN=Proxy Root CA",
-            ]
-        )
-
-
-def generate_wildcard_cert():
-    """Generate wildcard certificate signed by our CA"""
-    if not (CERTS_DIR / "proxy.key").exists():
-        # Generate private key
-        run_openssl(["genrsa", "-out", str(CERTS_DIR / "proxy.key"), "2048"])
-
-        # Generate CSR
-        run_openssl(
-            [
-                "req",
-                "-new",
-                "-key",
-                str(CERTS_DIR / "proxy.key"),
-                "-out",
-                str(CERTS_DIR / "proxy.csr"),
-                "-subj",
-                "/C=US/ST=State/L=City/O=Proxy/CN=*.proxy.local",
-            ]
-        )
-
-        # Create config file for SAN
-        with open(CERTS_DIR / "proxy.cnf", "w") as f:
-            f.write(
-                """[req]
-req_extensions = v3_req
-distinguished_name = req_distinguished_name
-
-[req_distinguished_name]
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = nonRepudiation, digitalSignature, keyEncipherment
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = *.proxy.local
-DNS.2 = *.com
-DNS.3 = *.org
-DNS.4 = *.net
-DNS.5 = *.io
-DNS.6 = *.*
-"""
-            )
-
-        # Generate certificate
-        run_openssl(
-            [
-                "x509",
-                "-req",
-                "-in",
-                str(CERTS_DIR / "proxy.csr"),
-                "-CA",
-                str(CA_DIR / "rootCA.crt"),
-                "-CAkey",
-                str(CA_DIR / "rootCA.key"),
-                "-CAcreateserial",
-                "-out",
-                str(CERTS_DIR / "proxy.crt"),
-                "-days",
-                "365",
-                "-sha256",
-                "-extfile",
-                str(CERTS_DIR / "proxy.cnf"),
-                "-extensions",
-                "v3_req",
-            ]
-        )
-
-
-def main():
-    # Create directories
-    CA_DIR.mkdir(exist_ok=True)
-    CERTS_DIR.mkdir(exist_ok=True)
-
-    # Generate certificates
-    generate_ca()
-    generate_wildcard_cert()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    print("Starting signer service...", flush=True)
+    app.run(host='0.0.0.0', port=8001)
 ```
 
 **Line-by-Line Explanation:**
 
-1. **Imports and Path Setup**:  
+1. **Imports**:
    ```python
-   import subprocess
-   from pathlib import Path
-
-   CA_DIR = Path("/ca")
-   CERTS_DIR = Path("/certs")
+   from flask import Flask, request
+   from cryptography.hazmat.primitives import serialization, hashes
+   from cryptography.hazmat.primitives.asymmetric import padding
+   import time
    ```  
-   - Imports `subprocess` for running shell commands and `Path` for path manipulations.
-   - Defines directories for storing CA and certificate files.
+   - `Flask` for building the web service.
+   - `cryptography` library for handling cryptographic operations.
+   - `time` for timestamp generation.
 
-2. **Utility Function `run_openssl`**:  
+2. **Initialize Flask App and Load Private Key**:
    ```python
-   def run_openssl(command):
-       subprocess.run(["openssl"] + command, check=True)
-   ```  
-   - Prepends the `openssl` command to the provided arguments and executes it.
-   - Raises an error if the command fails.
+   app = Flask(__name__)
 
-3. **Generate Root CA**:  
+   # Load the private key at startup
+   with open("/certs/private_key.pem", "rb") as key_file:
+       private_key = serialization.load_pem_private_key(
+           key_file.read(),
+           password=None,
+       )
+   ```  
+   - Initializes the Flask application.
+   - Loads the RSA private key from the mounted `/certs/private_key.pem` file.
+
+3. **Sign Endpoint**:
    ```python
-   def generate_ca():
-       ...
+   @app.route('/sign', methods=['GET'])
+   def sign():
+       request_id = request.args.get('id', '')
+       timestamp = str(int(time.time()))
+       
+       # Create and sign message
+       message = f"{timestamp} | {request_id}"
+       print(f"Signing message: {message}", flush=True)
+       signature = private_key.sign(
+           message.encode(),
+           padding.PKCS1v15(),
+           hashes.SHA256()
+       )
+       print(f"Signature: {signature.hex()}", flush=True)
+       
+       # Return headers instead of JSON
+       response = app.make_response('')
+       response.headers['X-Timestamp'] = timestamp
+       response.headers['X-Signature'] = signature.hex()
+       return response
    ```  
-   - Checks if `rootCA.key` exists. If not, generates a 4096-bit RSA private key and a corresponding self-signed CA certificate valid for 10 years.
+   - Retrieves the `id` parameter from the query string.
+   - Generates a current timestamp.
+   - Creates a message combining the timestamp and request ID.
+   - Signs the message using the loaded private key with PKCS1v15 padding and SHA256 hashing.
+   - Returns the timestamp and signature in HTTP headers.
 
-4. **Generate Wildcard Certificate**:  
+4. **Run the Flask App**:
    ```python
-   def generate_wildcard_cert():
-       ...
+   if __name__ == '__main__':
+       print("Starting signer service...", flush=True)
+       app.run(host='0.0.0.0', port=8001)
    ```  
-   - Checks if `proxy.key` exists. If not, generates a 2048-bit RSA private key.
-   - Creates a Certificate Signing Request (CSR) for a wildcard domain (`*.proxy.local`).
-   - Writes a configuration file (`proxy.cnf`) to specify Subject Alternative Names (SANs).
-   - Generates the wildcard certificate (`proxy.crt`) signed by the previously created root CA.
-
-5. **Main Execution**:  
-   ```python
-   def main():
-       # Create directories
-       CA_DIR.mkdir(exist_ok=True)
-       CERTS_DIR.mkdir(exist_ok=True)
-
-       # Generate certificates
-       generate_ca()
-       generate_wildcard_cert()
-
-   if __name__ == "__main__":
-       main()
-   ```  
-   - Ensures that the CA and certificates directories exist.
-   - Initiates the certificate generation process.
+   - Prints a startup message.
+   - Runs the Flask app, listening on all interfaces at port `8001`.
 
 ---
 
@@ -574,10 +500,6 @@ http {
         # Remove SSL configuration for now since we don't have certificates
         # listen 443 ssl;
         server_name _;
-
-        # Comment out SSL configuration
-        # ssl_certificate /certs/proxy.crt;
-        # ssl_certificate_key /certs/proxy.key;
 
         set $logging_backend "logging-server:8000";
 
@@ -618,7 +540,7 @@ http {
 
 **Line-by-Line Explanation:**
 
-1. **Events Block**:  
+1. **Events Block**:
    ```nginx
    events {
        worker_connections 1024;
@@ -626,7 +548,7 @@ http {
    ```  
    - Defines the maximum number of simultaneous connections Nginx can handle.
 
-2. **HTTP Block**:  
+2. **HTTP Block**:
    ```nginx
    http {
        ...
@@ -634,7 +556,7 @@ http {
    ```  
    - Encloses all HTTP-related configurations.
 
-3. **Log Format**:  
+3. **Log Format**:
    ```nginx
    log_format debug_log '[$time_local] $remote_addr - $remote_user - $server_name '
                        'to: $upstream_addr: $request upstream_response_time $upstream_response_time '
@@ -646,21 +568,21 @@ http {
    ```  
    - Defines a custom log format named `debug_log` that captures various request and response details, including custom headers.
 
-4. **Access and Error Logs**:  
+4. **Access and Error Logs**:
    ```nginx
    access_log /dev/stdout debug_log;
    error_log /dev/stdout debug;
    ```  
    - Directs access and error logs to standard output using the defined log formats.
 
-5. **DNS Resolver**:  
+5. **DNS Resolver**:
    ```nginx
    resolver 127.0.0.11 valid=30s ipv6=off;
    ```  
    - Configures Nginx to use Docker's internal DNS resolver for service discovery.
    - Sets DNS entries to be valid for 30 seconds and disables IPv6.
 
-6. **Server Block**:  
+6. **Server Block**:
    ```nginx
    server {
        listen 80;
@@ -668,20 +590,15 @@ http {
        # listen 443 ssl;
        server_name _;
 
-       # Comment out SSL configuration
-       # ssl_certificate /certs/proxy.crt;
-       # ssl_certificate_key /certs/proxy.key;
-
        set $logging_backend "logging-server:8000";
 
        ...
    }
    ```  
    - Listens on port `80` for HTTP requests.
-   - SSL configurations are commented out as certificates are not currently set up.
    - Defines a variable `$logging_backend` pointing to the `logging-server` service on port `8000`.
 
-7. **Mirror Location**:  
+7. **Mirror Location**:
    ```nginx
    location = /_mirror {
        internal;
@@ -703,7 +620,7 @@ http {
    - Sets various headers, including a custom header `custom-header`.
    - Configured to not wait for the logging server's response to prevent delays.
 
-8. **Main Location Block**:  
+8. **Main Location Block**:
    ```nginx
    location / {
        # Mirror the request to the logging location
@@ -750,7 +667,7 @@ exec /original-entrypoint.sh "$@"
 
 **Line-by-Line Explanation:**
 
-1. **Shebang and Options**:  
+1. **Shebang and Options**:
    ```bash
    #!/bin/bash
    set -e
@@ -758,7 +675,7 @@ exec /original-entrypoint.sh "$@"
    - Specifies the script to be run using Bash.
    - `set -e` ensures that the script exits immediately if any command exits with a non-zero status.
 
-2. **Retrieve Nginx Proxy IP**:  
+2. **Retrieve Nginx Proxy IP**:
    ```bash
    NGINX_IP=$(getent hosts nginx-proxy | awk '{ print $1 }')
    echo "NGINX_IP: $NGINX_IP"
@@ -766,14 +683,14 @@ exec /original-entrypoint.sh "$@"
    - Uses `getent` to resolve the hostname `nginx-proxy` to its IP address.
    - Stores the IP in the `NGINX_IP` variable and prints it for debugging purposes.
 
-3. **Set Up iptables Rules**:  
+3. **Set Up iptables Rules**:
    ```bash
    sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination $NGINX_IP:80
    sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $NGINX_IP:80
    ```  
    - Adds NAT rules to redirect all outgoing TCP traffic on ports `80` (HTTP) and `443` (HTTPS) to the Nginx proxy's IP on port `80`.
 
-4. **Execute Original Entrypoint**:  
+4. **Execute Original Entrypoint**:
    ```bash
    exec /original-entrypoint.sh "$@"
    ```  
@@ -811,16 +728,7 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      # - cert-gen
       - nginx-proxy
-
-  # cert-gen:
-  #   build:
-  #     context: .
-  #     dockerfile: certgen.Dockerfile
-  #   volumes:
-  #     - ./ca:/ca
-  #     - ./certs:/certs
 
   # Nginx reverse proxy for header injection and routing
   nginx-proxy:
@@ -843,6 +751,15 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+  signer:
+    build: 
+      context: .
+      dockerfile: signer.Dockerfile
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - app_net
+
 networks:
   app_net:
     driver: bridge
@@ -850,22 +767,21 @@ networks:
 
 **Section-by-Section Explanation:**
 
-1. **Services Definition**:  
+1. **Services Definition**:
    ```yaml
    services:
      computer-use-demo:
-       ...
-     # cert-gen:
        ...
      nginx-proxy:
        ...
      logging-server:
        ...
+     signer:
+       ...
    ```  
    - Defines all services used in the application.
-   - The `cert-gen` service is currently commented out, indicating it may not be in use.
 
-2. **`computer-use-demo` Service**:  
+2. **`computer-use-demo` Service**:
    ```yaml
    computer-use-demo:
      build:
@@ -888,7 +804,6 @@ networks:
      cap_add:
        - NET_ADMIN
      depends_on:
-       # - cert-gen
        - nginx-proxy
    ```  
    - **Build Configuration**:  
@@ -918,23 +833,8 @@ networks:
    
    - **Dependencies**:  
      - Depends on the `nginx-proxy` service.
-     - The `cert-gen` service is commented out and not currently a dependency.
 
-3. **`cert-gen` Service** (Commented Out):  
-   ```yaml
-   # cert-gen:
-   #   build:
-   #     context: .
-   #     dockerfile: certgen.Dockerfile
-   #   volumes:
-   #     - ./ca:/ca
-   #     - ./certs:/certs
-   ```  
-   - Intended to build and run the certificate generation process.
-   - Mounts local directories for CA and certificates.
-   - Currently disabled by being commented out.
-
-4. **`nginx-proxy` Service**:  
+3. **`nginx-proxy` Service**:
    ```yaml
    nginx-proxy:
      image: nginx:alpine
@@ -959,7 +859,7 @@ networks:
    - **Dependencies**:  
      - Depends on the `logging-server` service to ensure it's running first.
 
-5. **`logging-server` Service**:  
+4. **`logging-server` Service**:
    ```yaml
    logging-server:
      build: 
@@ -979,7 +879,27 @@ networks:
    - **Ports**:  
      - Forwards port `8000` from the container to `127.0.0.1:8000` on the host, making it accessible only locally.
 
-6. **Networks Definition**:  
+5. **`signer` Service**:
+   ```yaml
+   signer:
+     build: 
+       context: .
+       dockerfile: signer.Dockerfile
+     volumes:
+       - ./certs:/certs:ro
+     networks:
+       - app_net
+   ```  
+   - **Build Configuration**:  
+     - Builds the image using `signer.Dockerfile` from the current context.
+   
+   - **Volumes**:  
+     - Mounts the `certs` directory as read-only to access the private key and certificates.
+   
+   - **Networks**:  
+     - Connects to the `app_net` network.
+
+6. **Networks Definition**:
    ```yaml
    networks:
      app_net:
@@ -993,29 +913,34 @@ networks:
 
 This codebase establishes a Dockerized environment comprising:
 
-1. **Main Application (`computer-use-demo`)**:  
+1. **Main Application (`computer-use-demo`)**:
    - Built from a specialized Anthropic base image.
    - Configured with network management (`iptables`) to redirect HTTP/HTTPS traffic through a reverse proxy.
    - Supports GUI applications via X11 forwarding.
 
-2. **Reverse Proxy (`nginx-proxy`)**:  
+2. **Reverse Proxy (`nginx-proxy`)**:
    - Utilizes Nginx to handle incoming HTTP requests.
    - Mirrors requests to the `logging-server` for logging purposes.
-   - Prepares for SSL implementation, though currently operating over HTTP.
+   - Currently only operating over HTTP.
 
-3. **Logging Server (`logging-server`)**:  
+3. **Logging Server (`logging-server`)**:
    - Runs a simple Python-based HTTP server that logs incoming requests in JSON format.
    - Accessible only from the host machine.
 
-4. **Certificate Generation (`cert-gen`)**:  
-   - Although currently disabled, this service is designed to generate a root CA and wildcard certificates for secure communications.
-   - Facilitates SSL configurations in the future.
+4. **Signer Service (`signer`)**:
+   - Provides signature support for incoming requests.
+   - Implements a Flask-based web service that signs request data using a private key.
+   - Enhances security by allowing verification of request authenticity.
 
-5. **Networking**:  
+5. **Networking**:
    - All services communicate over a custom bridge network (`app_net`), ensuring isolation and controlled connectivity.
    - The main application container has elevated network permissions to manage traffic routing effectively.
 
-6. **Entrypoint Script**:  
+6. **Entrypoint Script**:
    - Custom script in the main application container modifies `iptables` to ensure all outbound HTTP/HTTPS traffic is routed through the Nginx proxy, enabling centralized request handling and logging.
+
+7. **Docker Compose Orchestration**:
+   - Manages the orchestration of all containers, handling dependencies and network configurations seamlessly.
+   - Facilitates easy scaling and addition of services as needed.
 
 This setup is modular, allowing for easy scaling and addition of services as needed. The use of Docker Compose simplifies the orchestration of these containers, managing dependencies and network configurations seamlessly.
