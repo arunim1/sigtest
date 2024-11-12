@@ -6,4 +6,4 @@ COPY logger.py .
 
 EXPOSE 8000
 
-CMD ["python", "logger.py"]
+CMD ["python", "-u", "logger.py"]

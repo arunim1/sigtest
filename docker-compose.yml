@@ -52,6 +52,15 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+  signer:
+    build: 
+      context: .
+      dockerfile: signer.Dockerfile
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - app_net
+
 networks:
   app_net:
     driver: bridge
