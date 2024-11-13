@@ -6,6 +6,9 @@ set -e
 
 python http_server.py > /tmp/server_logs.txt 2>&1 &
 
+# export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt 
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt 
+
 STREAMLIT_SERVER_PORT=8501 python -m streamlit run computer_use_demo/streamlit.py > /tmp/streamlit_stdout.log &
 
 echo "✨ Computer Use Demo is ready!"
