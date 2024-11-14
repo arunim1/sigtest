@@ -36,6 +36,15 @@ services:
     ports:
       - "8081:8081"
 
+  test-web-server:
+    build:
+      context: .
+      dockerfile: test-web-server.Dockerfile
+    ports:
+      - "5000:5000"
+    networks:
+      - app_net
+
 networks:
   app_net:
     driver: bridge

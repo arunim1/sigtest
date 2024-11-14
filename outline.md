@@ -1,6 +1,6 @@
 # Comprehensive Explanation of the Codebase
 
-This codebase sets up a Docker-based environment that includes a computer-use demo application, a logging server, a reverse proxy using Nginx, and signature support via a signer service. Below is a detailed walkthrough of each component and its respective code.
+This codebase sets up a Docker-based environment that includes a computer-use demo application and a mitmproxy service for intercepting and modifying HTTP/HTTPS traffic. Below is a detailed walkthrough of each component and its respective code.
 
 ## Table of Contents
 
@@ -9,13 +9,11 @@ This codebase sets up a Docker-based environment that includes a computer-use de
   - [Overview](#overview)
   - [Dockerfiles](#dockerfiles)
     - [`computer-use.Dockerfile`](#computer-usedockerfile)
-    - [`logger.Dockerfile`](#loggerdockerfile)
-    - [`signer.Dockerfile`](#signerdockerfile)
+    - [`mitmproxy.Dockerfile`](#mitmproxydockerfile)
   - [Python Scripts](#python-scripts)
-    - [`logger.py`](#loggerpy)
-    - [`signer.py`](#signerpy)
-  - [Nginx Configuration](#nginx-configuration)
-    - [`nginx.conf`](#nginxconf)
+    - [`add_headers.py`](#add_headerspy)
+  - [Mitmproxy Configuration](#mitmproxy-configuration)
+    - [`mitmproxy-config.yml`](#mitmproxy-configyml)
   - [Shell Script](#shell-script)
     - [`entrypoint.sh`](#entrypointsh)
   - [Docker Compose](#docker-compose)
@@ -29,11 +27,9 @@ This codebase sets up a Docker-based environment that includes a computer-use de
 The system is composed of several Docker containers orchestrated using Docker Compose. The primary components include:
 
 - **computer-use-demo**: The main application container.
-- **nginx-proxy**: Acts as a reverse proxy to handle HTTP requests and inject custom headers.
-- **logging-server**: A simple HTTP server that logs incoming requests.
-- **signer**: A Flask-based service that signs requests using a private key.
+- **mitmproxy**: Acts as a proxy to intercept and modify HTTP/HTTPS requests and responses.
 
-Additionally, custom scripts and configurations manage networking, request logging, and request signing.
+Additionally, custom scripts and configurations manage networking and request handling.
 
 ---
 
@@ -48,14 +44,20 @@ FROM ghcr.io/anthropics/anthropic-quickstarts:computer-use-demo-latest
 
 USER root
 
-# Install iptables
+# Install iptables and SSL libraries
 RUN apt-get update && \
-    apt-get install -y iptables && \
+    apt-get install -y iptables libpci3 libnss3-tools ca-certificates && \
     rm -rf /var/lib/apt/lists/* 
 
 # Ensure proper X11 permissions
 RUN mkdir -p /tmp/.X11-unix && \
     chmod 1777 /tmp/.X11-unix
+
+# Copy the root CA certificate
+COPY certs/mitmproxy-ca-cert.cer /usr/local/share/ca-certificates/mitmproxy-ca-cert.crt
+
+# Update certificates
+RUN update-ca-certificates -v
 
 # Copy and set permissions for entrypoint scripts
 COPY original-entrypoint.sh /original-entrypoint.sh
@@ -85,13 +87,13 @@ ENTRYPOINT ["/entrypoint.sh"]
    ```  
    - Grants administrative privileges to perform system-level tasks.
 
-3. **Install `iptables`**:
+3. **Install `iptables` and SSL Libraries**:
    ```dockerfile
    RUN apt-get update && \
-       apt-get install -y iptables && \
+       apt-get install -y iptables libpci3 libnss3-tools ca-certificates && \
        rm -rf /var/lib/apt/lists/* 
    ```  
-   - Updates package lists, installs `iptables` for network traffic management, and cleans up to reduce image size.
+   - Updates package lists, installs `iptables` for network traffic management, SSL libraries for secure communications, and cleans up to reduce image size.
 
 4. **Set Up X11 Permissions**:
    ```dockerfile
@@ -100,7 +102,19 @@ ENTRYPOINT ["/entrypoint.sh"]
    ```  
    - Creates the X11 Unix socket directory with appropriate permissions for GUI applications.
 
-5. **Manage Entrypoint Scripts**:
+5. **Copy the Root CA Certificate**:
+   ```dockerfile
+   COPY certs/mitmproxy-ca-cert.cer /usr/local/share/ca-certificates/mitmproxy-ca-cert.crt
+   ```  
+   - Adds the mitmproxy CA certificate to the system's trusted certificates.
+
+6. **Update Certificates**:
+   ```dockerfile
+   RUN update-ca-certificates -v
+   ```  
+   - Updates the system's certificate store to include the new CA certificate.
+
+7. **Manage Entrypoint Scripts**:
    ```dockerfile
    COPY original-entrypoint.sh /original-entrypoint.sh
    COPY entrypoint.sh /entrypoint.sh
@@ -113,13 +127,13 @@ ENTRYPOINT ["/entrypoint.sh"]
    - Copies both the original and custom entrypoint scripts into the container.
    - Makes them executable and changes ownership to the `computeruse` user.
 
-6. **Switch Back to Non-Root User**:
+8. **Switch Back to Non-Root User**:
    ```dockerfile
    USER computeruse
    ```  
    - Enhances security by running the container with a non-root user.
 
-7. **Set Entrypoint**:
+9. **Set Entrypoint**:
    ```dockerfile
    ENTRYPOINT ["/entrypoint.sh"]
    ```  
@@ -127,29 +141,28 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 ---
 
-### `logger.Dockerfile`
+### `mitmproxy.Dockerfile`
 
-This Dockerfile builds the `logging-server` container, which logs incoming HTTP requests.
+This Dockerfile builds the `mitmproxy` container, which intercepts and modifies HTTP/HTTPS traffic using a custom script.
 
 ```dockerfile
-FROM python:3.9-slim
+FROM mitmproxy/mitmproxy:latest
 
 WORKDIR /app
 
-COPY logger.py .
+COPY add_headers.py .
+COPY mitmproxy-config.yml .
 
-EXPOSE 8000
-
-CMD ["python", "-u", "logger.py"]
+CMD ["mitmproxy", "-s", "add_headers.py", "-p", "8082", "--listen-host", "0.0.0.0"]
 ```
 
 **Line-by-Line Explanation:**
 
 1. **Base Image**:
    ```dockerfile
-   FROM python:3.9-slim
+   FROM mitmproxy/mitmproxy:latest
    ```  
-   - Uses a lightweight Python 3.9 image.
+   - Uses the latest official `mitmproxy` image.
 
 2. **Set Working Directory**:
    ```dockerfile
@@ -159,224 +172,38 @@ CMD ["python", "-u", "logger.py"]
 
 3. **Copy Application Code**:
    ```dockerfile
-   COPY logger.py .
+   COPY add_headers.py .
+   COPY mitmproxy-config.yml .
    ```  
-   - Copies the `logger.py` script into the container's working directory.
+   - Copies the `add_headers.py` script and mitmproxy configuration file into the container.
 
-4. **Expose Port**:
+4. **Define Command**:
    ```dockerfile
-   EXPOSE 8000
+   CMD ["mitmproxy", "-s", "add_headers.py", "-p", "8082", "--listen-host", "0.0.0.0"]
    ```  
-   - Opens port `8000` for incoming connections.
-
-5. **Define Command**:
-   ```dockerfile
-   CMD ["python", "-u", "logger.py"]
-   ```  
-   - Specifies the command to run the `logger.py` script using Python in unbuffered mode.
-
----
-
-### `signer.Dockerfile`
-
-This Dockerfile builds the `signer` container, which provides signature support for incoming requests.
-
-```dockerfile
-FROM python:3.9-slim
-
-RUN pip install flask cryptography
-
-WORKDIR /app
-COPY signer.py .
-
-CMD ["python", "signer.py"]
-```
-
-**Line-by-Line Explanation:**
-
-1. **Base Image**:
-   ```dockerfile
-   FROM python:3.9-slim
-   ```  
-   - Uses a lightweight Python 3.9 image.
-
-2. **Install Dependencies**:
-   ```dockerfile
-   RUN pip install flask cryptography
-   ```  
-   - Installs the `flask` framework for building the web service and `cryptography` library for handling cryptographic operations.
-
-3. **Set Working Directory**:
-   ```dockerfile
-   WORKDIR /app
-   ```  
-   - Sets `/app` as the current working directory inside the container.
-
-4. **Copy Application Code**:
-   ```dockerfile
-   COPY signer.py .
-   ```  
-   - Copies the `signer.py` script into the container's working directory.
-
-5. **Define Command**:
-   ```dockerfile
-   CMD ["python", "signer.py"]
-   ```  
-   - Specifies the command to run the `signer.py` script using Python.
+   - Starts `mitmproxy` with the `add_headers.py` script on port `8082`, listening on all interfaces.
 
 ---
 
 ## Python Scripts
 
-### `logger.py`
+### `add_headers.py`
 
-A simple HTTP server that logs incoming requests in JSON format.
-
-```python
-import json
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-
-class LoggingHandler(BaseHTTPRequestHandler):
-    def _handle_request(self):
-        # Log request details
-        timestamp = datetime.now().isoformat()
-        request_info = {
-            "timestamp": timestamp,
-            "method": self.command,
-            "path": self.path,
-            "headers": dict(self.headers),
-            "client_address": self.client_address[0],
-        }
-
-        print(json.dumps(request_info, indent=2))
-
-        # Send a simple response
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Request logged")
-
-    def do_GET(self):
-        self._handle_request()
-
-    def do_POST(self):
-        self._handle_request()
-
-    def do_PUT(self):
-        self._handle_request()
-
-    def do_DELETE(self):
-        self._handle_request()
-
-    def do_PATCH(self):
-        self._handle_request()
-
-
-if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", 8000), LoggingHandler)
-    print("Starting logging server on port 8000...")
-    server.serve_forever()
-```
-
-**Line-by-Line Explanation:**
-
-1. **Imports**:
-   ```python
-   import json
-   from datetime import datetime
-   from http.server import BaseHTTPRequestHandler, HTTPServer
-   ```  
-   - `json`, `datetime` for handling time and formatting logs.
-   - `BaseHTTPRequestHandler`, `HTTPServer` for creating the HTTP server.
-
-2. **LoggingHandler Class**:
-   ```python
-   class LoggingHandler(BaseHTTPRequestHandler):
-       def _handle_request(self):
-           ...
-       
-       def do_GET(self):
-           self._handle_request()
-       
-       def do_POST(self):
-           self._handle_request()
-       
-       def do_PUT(self):
-           self._handle_request()
-       
-       def do_DELETE(self):
-           self._handle_request()
-       
-       def do_PATCH(self):
-           self._handle_request()
-   ```  
-   - Inherits from `BaseHTTPRequestHandler` to handle HTTP requests.
-   - The `_handle_request` method logs request details and sends a response.
-   - The HTTP methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) all delegate to `_handle_request`.
-
-3. **Handling Requests**:
-   ```python
-   def _handle_request(self):
-       # Log request details
-       timestamp = datetime.now().isoformat()
-       request_info = {
-           "timestamp": timestamp,
-           "method": self.command,
-           "path": self.path,
-           "headers": dict(self.headers),
-           "client_address": self.client_address[0],
-       }
-
-       print(json.dumps(request_info, indent=2))
-
-       # Send a simple response
-       self.send_response(200)
-       self.send_header("Content-Type", "text/plain")
-       self.end_headers()
-       self.wfile.write(b"Request logged")
-   ```  
-   - Captures the current timestamp.
-   - Gathers request details: HTTP method, path, headers, and client IP address.
-   - Prints the request information as a formatted JSON string to the console.
-   - Sends a `200 OK` response with a plain text message.
-
-4. **Running the Server**:
-   ```python
-   if __name__ == "__main__":
-       server = HTTPServer(("0.0.0.0", 8000), LoggingHandler)
-       print("Starting logging server on port 8000...")
-       server.serve_forever()
-   ```  
-   - Initializes the HTTP server to listen on all interfaces (`0.0.0.0`) at port `8000`.
-   - Prints a startup message.
-   - Begins serving requests indefinitely.
-
----
-
-### `signer.py`
-
-A Flask-based service that signs incoming requests using a private key.
+A Mitmproxy addon script that injects custom headers into HTTP and HTTPS traffic.
 
 ```python
-from flask import Flask, request
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
+from mitmproxy import http
 import time
 
-app = Flask(__name__)
-
-# Load the private key at startup
 with open("/certs/private_key.pem", "rb") as key_file:
     private_key = serialization.load_pem_private_key(
         key_file.read(),
         password=None,
     )
 
-@app.route('/sign', methods=['GET'])
-def sign():
-    request_id = request.args.get('id', '')
+def sign(request_id):
     timestamp = str(int(time.time()))
     
     # Create and sign message
@@ -390,48 +217,47 @@ def sign():
     print(f"Signature: {signature.hex()}", flush=True)
     
     # Return headers instead of JSON
-    response = app.make_response('')
-    response.headers['X-Timestamp'] = timestamp
-    response.headers['X-Signature'] = signature.hex()
-    return response
+    return timestamp, signature.hex()
 
-if __name__ == '__main__':
-    print("Starting signer service...", flush=True)
-    app.run(host='0.0.0.0', port=8001)
+def request(flow: http.HTTPFlow) -> None:
+    print(flow.request.pretty_url, flush=True)
+
+    # Get request ID
+    request_id = "12309"
+    flow.request.headers["Agent-ID"] = request_id
+
+    timestamp, signature = sign(request_id)
+
+    # Add headers to the request
+    flow.request.headers["Agent-Timestamp"] = timestamp
+    flow.request.headers["Agent-Signature"] = signature
+    print(flow.request.headers, flush=True)
 ```
 
 **Line-by-Line Explanation:**
 
 1. **Imports**:
    ```python
-   from flask import Flask, request
    from cryptography.hazmat.primitives import serialization, hashes
    from cryptography.hazmat.primitives.asymmetric import padding
+   from mitmproxy import http
    import time
    ```  
-   - `Flask` for building the web service.
-   - `cryptography` library for handling cryptographic operations.
-   - `time` for timestamp generation.
+   - Imports necessary modules for cryptographic operations, HTTP flow handling, and time management.
 
-2. **Initialize Flask App and Load Private Key**:
+2. **Load Private Key**:
    ```python
-   app = Flask(__name__)
-
-   # Load the private key at startup
    with open("/certs/private_key.pem", "rb") as key_file:
        private_key = serialization.load_pem_private_key(
            key_file.read(),
            password=None,
        )
    ```  
-   - Initializes the Flask application.
-   - Loads the RSA private key from the mounted `/certs/private_key.pem` file.
+   - Loads the private key used for signing requests.
 
-3. **Sign Endpoint**:
+3. **Signing Function**:
    ```python
-   @app.route('/sign', methods=['GET'])
-   def sign():
-       request_id = request.args.get('id', '')
+   def sign(request_id):
        timestamp = str(int(time.time()))
        
        # Create and sign message
@@ -445,203 +271,62 @@ if __name__ == '__main__':
        print(f"Signature: {signature.hex()}", flush=True)
        
        # Return headers instead of JSON
-       response = app.make_response('')
-       response.headers['X-Timestamp'] = timestamp
-       response.headers['X-Signature'] = signature.hex()
-       return response
+       return timestamp, signature.hex()
    ```  
-   - Retrieves the `id` parameter from the query string.
-   - Generates a current timestamp.
-   - Creates a message combining the timestamp and request ID.
-   - Signs the message using the loaded private key with PKCS1v15 padding and SHA256 hashing.
-   - Returns the timestamp and signature in HTTP headers.
+   - Generates a timestamp and signs a message containing the timestamp and request ID.
+   - Returns the timestamp and signature in hexadecimal format.
 
-4. **Run the Flask App**:
+4. **Request Handler**:
    ```python
-   if __name__ == '__main__':
-       print("Starting signer service...", flush=True)
-       app.run(host='0.0.0.0', port=8001)
+   def request(flow: http.HTTPFlow) -> None:
+       print(flow.request.pretty_url, flush=True)
+
+       # Get request ID
+       request_id = "12309"
+       flow.request.headers["Agent-ID"] = request_id
+
+       timestamp, signature = sign(request_id)
+
+       # Add headers to the request
+       flow.request.headers["Agent-Timestamp"] = timestamp
+       flow.request.headers["Agent-Signature"] = signature
+       print(flow.request.headers, flush=True)
    ```  
-   - Prints a startup message.
-   - Runs the Flask app, listening on all interfaces at port `8001`.
+   - Handles incoming HTTP requests by adding custom headers for identification, timestamp, and signature.
 
 ---
 
-## Nginx Configuration
+## Mitmproxy Configuration
 
-### `nginx.conf`
+### `mitmproxy-config.yml`
 
-Configures Nginx as a reverse proxy that mirrors incoming requests to the logging server and handles request routing.
+Configures Mitmproxy settings for intercepting and modifying traffic.
 
-```nginx
-events {
-    worker_connections 1024;
-}
-
-# test with curl -X POST "https://httpbin.org/anything" 
-
-http {
-    log_format debug_log '[$time_local] $remote_addr - $remote_user - $server_name '
-                        'to: $upstream_addr: $request upstream_response_time $upstream_response_time '
-                        'request_time $request_time '
-                        'status: $status request_body: $request_body '
-                        'custom_header: $http_custom_header '
-                        'host: $http_host '
-                        'uri: $request_uri';
-
-    access_log /dev/stdout debug_log;
-    error_log /dev/stdout debug;
-
-    # Resolve DNS using Docker's DNS server
-    resolver 127.0.0.11 valid=30s ipv6=off;
-
-    server {
-        listen 80;
-        # Remove SSL configuration for now since we don't have certificates
-        # listen 443 ssl;
-        server_name _;
-
-        set $logging_backend "logging-server:8000";
-
-        # Define a mirror location
-        location = /_mirror {
-            internal;
-            proxy_pass http://$logging_backend$request_uri;
-            proxy_set_header Host $http_host; 
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header custom-header "intercepted";
-            
-            # Don't wait for logging server response
-            proxy_ignore_client_abort on;
-            proxy_read_timeout 1s;
-            proxy_connect_timeout 1s;
-        }
-
-        location / {
-            # Mirror the request to the logging location
-            mirror /_mirror;
-            mirror_request_body on;
-
-            # Remove HTTPS handling since we're only doing HTTP for now
-            proxy_set_header custom-header "intercepted";
-            proxy_set_header Host $http_host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            
-            proxy_pass http://$http_host$request_uri;
-            # proxy_pass http://logging-server:8000;
-        }
-    }
-}
+```yaml
+port: 8082
+listen_host: 0.0.0.0
+ssl_insecure: true
 ```
 
-**Line-by-Line Explanation:**
+**Configuration Details:**
 
-1. **Events Block**:
-   ```nginx
-   events {
-       worker_connections 1024;
-   }
-   ```  
-   - Defines the maximum number of simultaneous connections Nginx can handle.
+- **port**:  
+  ```yaml
+  port: 8082
+  ```  
+  - Sets Mitmproxy to listen on port `8082` for incoming traffic.
 
-2. **HTTP Block**:
-   ```nginx
-   http {
-       ...
-   }
-   ```  
-   - Encloses all HTTP-related configurations.
+- **listen_host**:  
+  ```yaml
+  listen_host: 0.0.0.0
+  ```  
+  - Configures Mitmproxy to accept connections on all network interfaces.
 
-3. **Log Format**:
-   ```nginx
-   log_format debug_log '[$time_local] $remote_addr - $remote_user - $server_name '
-                       'to: $upstream_addr: $request upstream_response_time $upstream_response_time '
-                       'request_time $request_time '
-                       'status: $status request_body: $request_body '
-                       'custom_header: $http_custom_header '
-                       'host: $http_host '
-                       'uri: $request_uri';
-   ```  
-   - Defines a custom log format named `debug_log` that captures various request and response details, including custom headers.
-
-4. **Access and Error Logs**:
-   ```nginx
-   access_log /dev/stdout debug_log;
-   error_log /dev/stdout debug;
-   ```  
-   - Directs access and error logs to standard output using the defined log formats.
-
-5. **DNS Resolver**:
-   ```nginx
-   resolver 127.0.0.11 valid=30s ipv6=off;
-   ```  
-   - Configures Nginx to use Docker's internal DNS resolver for service discovery.
-   - Sets DNS entries to be valid for 30 seconds and disables IPv6.
-
-6. **Server Block**:
-   ```nginx
-   server {
-       listen 80;
-       # Remove SSL configuration for now since we don't have certificates
-       # listen 443 ssl;
-       server_name _;
-
-       set $logging_backend "logging-server:8000";
-
-       ...
-   }
-   ```  
-   - Listens on port `80` for HTTP requests.
-   - Defines a variable `$logging_backend` pointing to the `logging-server` service on port `8000`.
-
-7. **Mirror Location**:
-   ```nginx
-   location = /_mirror {
-       internal;
-       proxy_pass http://$logging_backend$request_uri;
-       proxy_set_header Host $http_host; 
-       proxy_set_header X-Real-IP $remote_addr;
-       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-       proxy_set_header X-Forwarded-Proto $scheme;
-       proxy_set_header custom-header "intercepted";
-       
-       # Don't wait for logging server response
-       proxy_ignore_client_abort on;
-       proxy_read_timeout 1s;
-       proxy_connect_timeout 1s;
-   }
-   ```  
-   - Defines an internal location `/mirror` used for mirroring requests.
-   - Proxies the mirrored request to the logging server.
-   - Sets various headers, including a custom header `custom-header`.
-   - Configured to not wait for the logging server's response to prevent delays.
-
-8. **Main Location Block**:
-   ```nginx
-   location / {
-       # Mirror the request to the logging location
-       mirror /_mirror;
-       mirror_request_body on;
-
-       # Remove HTTPS handling since we're only doing HTTP for now
-       proxy_set_header custom-header "intercepted";
-       proxy_set_header Host $http_host;
-       proxy_set_header X-Real-IP $remote_addr;
-       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-       proxy_set_header X-Forwarded-Proto $scheme;
-       
-       proxy_pass http://$http_host$request_uri;
-       # proxy_pass http://logging-server:8000;
-   }
-   ```  
-   - Mirrors incoming requests to the `/mirror` location for logging.
-   - Enables mirroring of the request body.
-   - Sets various headers, including the `custom-header`.
-   - Proxies the original request to the intended destination (`$http_host$request_uri`).
+- **ssl_insecure**:  
+  ```yaml
+  ssl_insecure: true
+  ```  
+  - Allows Mitmproxy to intercept HTTPS traffic without verifying SSL certificates, useful for development and testing.
 
 ---
 
@@ -649,17 +334,30 @@ http {
 
 ### `entrypoint.sh`
 
-A custom entrypoint script that sets up `iptables` rules to redirect HTTP and HTTPS traffic through the Nginx proxy.
+A custom entrypoint script that sets up `iptables` rules to redirect HTTP and HTTPS traffic through the Mitmproxy service.
 
 ```bash
 #!/bin/bash
 set -e
 
-# Switch to root to set up iptables
-NGINX_IP=$(getent hosts nginx-proxy | awk '{ print $1 }')
-echo "NGINX_IP: $NGINX_IP"
-sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination $NGINX_IP:80
-sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $NGINX_IP:80
+# Function to retrieve service IPs
+get_service_ip() {
+    SERVICE_NAME=$1
+    getent hosts $SERVICE_NAME | awk '{ print $1 }'
+}
+
+# Retrieve IP for mitmproxy
+MITMPROXY_IP=$(get_service_ip mitmproxy)
+echo "MITMPROXY_IP: $MITMPROXY_IP"
+
+# Exclude traffic destined to mitmproxy (to prevent loops)
+sudo iptables -t nat -A OUTPUT -d $MITMPROXY_IP -j RETURN
+
+# Redirect outgoing HTTP traffic to mitmproxy
+sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination $MITMPROXY_IP:8082
+
+# Redirect outgoing HTTPS traffic to mitmproxy
+sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $MITMPROXY_IP:8082
 
 # Run the original command as computeruse user
 exec /original-entrypoint.sh "$@"
@@ -675,20 +373,28 @@ exec /original-entrypoint.sh "$@"
    - Specifies the script to be run using Bash.
    - `set -e` ensures that the script exits immediately if any command exits with a non-zero status.
 
-2. **Retrieve Nginx Proxy IP**:
+2. **Retrieve Mitmproxy IP**:
    ```bash
-   NGINX_IP=$(getent hosts nginx-proxy | awk '{ print $1 }')
-   echo "NGINX_IP: $NGINX_IP"
+   MITMPROXY_IP=$(get_service_ip mitmproxy)
+   echo "MITMPROXY_IP: $MITMPROXY_IP"
    ```  
-   - Uses `getent` to resolve the hostname `nginx-proxy` to its IP address.
-   - Stores the IP in the `NGINX_IP` variable and prints it for debugging purposes.
+   - Uses the `get_service_ip` function to resolve the hostname `mitmproxy` to its IP address.
+   - Stores the IP in the `MITMPROXY_IP` variable and prints it for debugging purposes.
 
 3. **Set Up iptables Rules**:
    ```bash
-   sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination $NGINX_IP:80
-   sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $NGINX_IP:80
+   # Exclude traffic destined to mitmproxy (to prevent loops)
+   sudo iptables -t nat -A OUTPUT -d $MITMPROXY_IP -j RETURN
+
+   # Redirect outgoing HTTP traffic to mitmproxy
+   sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination $MITMPROXY_IP:8082
+
+   # Redirect outgoing HTTPS traffic to mitmproxy
+   sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $MITMPROXY_IP:8082
    ```  
-   - Adds NAT rules to redirect all outgoing TCP traffic on ports `80` (HTTP) and `443` (HTTPS) to the Nginx proxy's IP on port `80`.
+   - Adds NAT rules to:
+     - Prevent loops by excluding traffic already destined for mitmproxy.
+     - Redirect all outgoing HTTP (`port 80`) and HTTPS (`port 443`) traffic to the Mitmproxy service on port `8082`.
 
 4. **Execute Original Entrypoint**:
    ```bash
@@ -728,37 +434,21 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
-      - nginx-proxy
+      - mitmproxy
 
-  # Nginx reverse proxy for header injection and routing
-  nginx-proxy:
-    image: nginx:alpine
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certs:/certs:ro
-    networks:
-      - app_net
-    depends_on:
-      - logging-server
-
-  # Simple logging web server
-  logging-server:
-    build: 
+  # Mitmproxy service for intercepting and modifying traffic
+  mitmproxy:
+    build:
       context: .
-      dockerfile: logger.Dockerfile
+      dockerfile: mitmproxy.Dockerfile
+    volumes:
+      - ./add_headers.py:/app/add_headers.py:ro
+      - ./mitmproxy-config.yml:/app/mitmproxy-config.yml:ro
+      - ./certs:/certs:ro
     networks:
       - app_net
     ports:
-      - "127.0.0.1:8000:8000"
-
-  signer:
-    build: 
-      context: .
-      dockerfile: signer.Dockerfile
-    volumes:
-      - ./certs:/certs:ro
-    networks:
-      - app_net
+      - "8082:8082"
 
 networks:
   app_net:
@@ -772,11 +462,7 @@ networks:
    services:
      computer-use-demo:
        ...
-     nginx-proxy:
-       ...
-     logging-server:
-       ...
-     signer:
+     mitmproxy:
        ...
    ```  
    - Defines all services used in the application.
@@ -804,7 +490,7 @@ networks:
      cap_add:
        - NET_ADMIN
      depends_on:
-       - nginx-proxy
+       - mitmproxy
    ```  
    - **Build Configuration**:  
      - Builds the image using `computer-use.Dockerfile` from the current context.
@@ -832,74 +518,38 @@ networks:
      - Adds `NET_ADMIN` capability to manage network configurations (`iptables`).
    
    - **Dependencies**:  
-     - Depends on the `nginx-proxy` service.
+     - Depends on the `mitmproxy` service.
 
-3. **`nginx-proxy` Service**:
+3. **`mitmproxy` Service**:
    ```yaml
-   nginx-proxy:
-     image: nginx:alpine
+   mitmproxy:
+     build:
+       context: .
+       dockerfile: mitmproxy.Dockerfile
      volumes:
-       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+       - ./add_headers.py:/app/add_headers.py:ro
+       - ./mitmproxy-config.yml:/app/mitmproxy-config.yml:ro
        - ./certs:/certs:ro
      networks:
        - app_net
-     depends_on:
-       - logging-server
-   ```  
-   - **Image**:  
-     - Uses the lightweight `nginx:alpine` image.
-   
-   - **Volumes**:  
-     - Mounts the custom `nginx.conf` as a read-only file.
-     - Mounts the `certs` directory as read-only for SSL configurations (currently not in use).
-   
-   - **Networks**:  
-     - Connects to the `app_net` network.
-   
-   - **Dependencies**:  
-     - Depends on the `logging-server` service to ensure it's running first.
-
-4. **`logging-server` Service**:
-   ```yaml
-   logging-server:
-     build: 
-       context: .
-       dockerfile: logger.Dockerfile
-     networks:
-       - app_net
      ports:
-       - "127.0.0.1:8000:8000"
+       - "8082:8082"
    ```  
    - **Build Configuration**:  
-     - Builds the image using `logger.Dockerfile` from the current context.
+     - Builds the image using `mitmproxy.Dockerfile` from the current context.
+   
+   - **Volumes**:  
+     - Mounts the `add_headers.py` script as read-only.
+     - Mounts the `mitmproxy-config.yml` configuration file as read-only.
+     - Mounts the `certs` directory as read-only to access SSL certificates.
    
    - **Networks**:  
      - Connects to the `app_net` network.
    
    - **Ports**:  
-     - Forwards port `8000` from the container to `127.0.0.1:8000` on the host, making it accessible only locally.
+     - Exposes port `8082` for Mitmproxy to intercept traffic.
 
-5. **`signer` Service**:
-   ```yaml
-   signer:
-     build: 
-       context: .
-       dockerfile: signer.Dockerfile
-     volumes:
-       - ./certs:/certs:ro
-     networks:
-       - app_net
-   ```  
-   - **Build Configuration**:  
-     - Builds the image using `signer.Dockerfile` from the current context.
-   
-   - **Volumes**:  
-     - Mounts the `certs` directory as read-only to access the private key and certificates.
-   
-   - **Networks**:  
-     - Connects to the `app_net` network.
-
-6. **Networks Definition**:
+4. **Networks Definition**:
    ```yaml
    networks:
      app_net:
@@ -915,32 +565,24 @@ This codebase establishes a Dockerized environment comprising:
 
 1. **Main Application (`computer-use-demo`)**:
    - Built from a specialized Anthropic base image.
-   - Configured with network management (`iptables`) to redirect HTTP/HTTPS traffic through a reverse proxy.
+   - Configured with network management (`iptables`) to redirect HTTP/HTTPS traffic through a Mitmproxy service.
    - Supports GUI applications via X11 forwarding.
 
-2. **Reverse Proxy (`nginx-proxy`)**:
-   - Utilizes Nginx to handle incoming HTTP requests.
-   - Mirrors requests to the `logging-server` for logging purposes.
-   - Currently only operating over HTTP.
+2. **Mitmproxy Service (`mitmproxy`)**:
+   - Utilizes Mitmproxy to intercept and modify HTTP/HTTPS traffic.
+   - Runs a custom `add_headers.py` script to inject custom headers into requests and responses.
+   - Configured via `mitmproxy-config.yml` for flexible proxy settings.
 
-3. **Logging Server (`logging-server`)**:
-   - Runs a simple Python-based HTTP server that logs incoming requests in JSON format.
-   - Accessible only from the host machine.
-
-4. **Signer Service (`signer`)**:
-   - Provides signature support for incoming requests.
-   - Implements a Flask-based web service that signs request data using a private key.
-   - Enhances security by allowing verification of request authenticity.
-
-5. **Networking**:
+3. **Networking**:
    - All services communicate over a custom bridge network (`app_net`), ensuring isolation and controlled connectivity.
-   - The main application container has elevated network permissions to manage traffic routing effectively.
+   - The main application container has elevated network permissions to manage traffic routing effectively through `iptables`.
+   - Mitmproxy intercepts all HTTP and HTTPS traffic, modifying it as configured.
 
-6. **Entrypoint Script**:
-   - Custom script in the main application container modifies `iptables` to ensure all outbound HTTP/HTTPS traffic is routed through the Nginx proxy, enabling centralized request handling and logging.
+4. **Entrypoint Script**:
+   - Custom script in the main application container modifies `iptables` to ensure all outbound HTTP/HTTPS traffic is routed through the Mitmproxy service, enabling centralized request handling and logging.
 
-7. **Docker Compose Orchestration**:
+5. **Docker Compose Orchestration**:
    - Manages the orchestration of all containers, handling dependencies and network configurations seamlessly.
    - Facilitates easy scaling and addition of services as needed.
 
-This setup is modular, allowing for easy scaling and addition of services as needed. The use of Docker Compose simplifies the orchestration of these containers, managing dependencies and network configurations seamlessly.
+This setup is modular, allowing for easy scaling and addition of services as needed. The use of Docker Compose simplifies the orchestration of these containers, managing dependencies and network configurations effectively while ensuring secure and monitored traffic flow within the environment.
