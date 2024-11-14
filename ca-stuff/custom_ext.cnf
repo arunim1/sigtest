@@ -1,0 +1,8 @@
+[ extensions ]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+# Use Base64-encoded values with ASN1:OCTETSTRING
+1.2.3.4.5.6.7.8.1 = ASN1:OCTETSTRING:AA==
+1.2.3.4.5.6.7.8.2 = ASN1:OCTETSTRING:B/8=
