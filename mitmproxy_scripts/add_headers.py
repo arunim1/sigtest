@@ -19,19 +19,19 @@ def sign(request_id):
     
     # Create and sign message
     message = f"{timestamp} | {request_id}"
-    print(f"Signing message: {message}", flush=True)
+    # print(f"Signing message: {message}", flush=True)
     signature = private_key.sign(
         message.encode(),
         padding.PKCS1v15(),
         hashes.SHA256()
     )
-    print(f"Signature: {signature.hex()}", flush=True)
+    # print(f"Signature: {signature.hex()}", flush=True)
     
     # Return headers instead of JSON
     return timestamp, signature.hex()
 
 def request(flow: http.HTTPFlow) -> None:
-    print(flow.request.pretty_url, flush=True)
+    # print(flow.request.pretty_url, flush=True)
 
     # Get request ID
     request_id = "12309"
@@ -48,4 +48,4 @@ def request(flow: http.HTTPFlow) -> None:
     cert_b64 = base64.b64encode(cert_der).decode()
     flow.request.headers["agent-cert"] = cert_b64
     
-    print(flow.request.headers, flush=True)
+    # print(flow.request.headers, flush=True)

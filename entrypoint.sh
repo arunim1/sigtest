@@ -10,9 +10,10 @@ get_service_ip() {
 # Retrieve IPs for mitmproxy and test-web-server
 MITMPROXY_IP=$(get_service_ip mitmproxy)
 TESTWEB_IP=$(get_service_ip test-web-server)
-
+BLOG_IP=$(get_service_ip blog)
 echo "MITMPROXY_IP: $MITMPROXY_IP"
 echo "TESTWEB_IP: $TESTWEB_IP"
+echo "BLOG_IP: $BLOG_IP"
 
 # Exclude traffic destined to mitmproxy (to prevent loops)
 sudo iptables -t nat -A OUTPUT -d $MITMPROXY_IP -j RETURN
@@ -25,6 +26,7 @@ sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination $MITM
 
 # Redirect traffic to test-web-server:5000 through mitmproxy
 sudo iptables -t nat -A OUTPUT -p tcp -d $TESTWEB_IP --dport 5000 -j DNAT --to-destination $MITMPROXY_IP:8082
+# the others aren't needed because they are already redirected to mitmproxy on account of being served on port 80
 
 # Run the original command as computeruse user
 exec /original-entrypoint.sh "$@"

@@ -39,9 +39,18 @@ services:
   test-web-server:
     build:
       context: .
-      dockerfile: test-web-server.Dockerfile
+      dockerfile: test-web-server/Dockerfile
     ports:
-      - "5000:5000"
+        - "5001:5000"
+    networks:
+      - app_net
+
+  blog:
+    build:
+      context: ./blog
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"  # Blog served on port 80
     networks:
       - app_net
 
